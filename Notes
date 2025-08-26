@@ -1,0 +1,12 @@
+trigger LeadTrigger on Lead (after update) {
+    for (Lead ld : Trigger.new) {
+        Lead oldLd = Trigger.oldMap.get(ld.Id);
+
+        if (ld.IsConverted && !oldLd.IsConverted && ld.ConvertedOpportunityId != null && ld.ConvertedContactId != null) {
+            CustomCampaignAttributionFromFlow.applyInfluenceFromLead(ld.Id, ld.ConvertedOpportunityId, ld.ConvertedContactId);
+        }
+    }
+}
+
+
+Write a test class for this in sfdc make sure you cover all cases, get more than 75 percent coverage
