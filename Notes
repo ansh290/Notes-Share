@@ -1,3 +1,13 @@
+Field does not exist: Name on CampaignInfluenceModel (line 12)
+Field does not exist: IsDefault on CampaignInfluenceModel (line 12)
+Field is not writeable: CampaignInfluenceModel.IsModelLocked  (line 12)
+DML operation Insert not allowed on CampaignInfluenceModel (line 17)
+Illegal assignment from Decimal to Integer (line 230)
+
+
+
+
+
 @isTest
 private class CampaignMemberTriggerTest {
     
