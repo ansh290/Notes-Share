@@ -1,3 +1,22 @@
+fields in campaign Influence 
+
+Fields & Relationships
+SortField LabelSorted Ascending	SortField Name	SortData Type	SortControlling Field	SortIndexed	Actions
+Campaign	CampaignId	Lookup(Campaign)		False	
+Campaign Influence Model	ModelId	Lookup(Campaign Influence Model)		False	
+Contact	ContactId	Lookup(Contact)		False	
+Created By	CreatedById	Lookup(User)		True	
+Created Date	CreatedDate	Date/Time		True	
+Influence (%)	Influence	Percent(3, 2)		False	
+Last Modified By	LastModifiedById	Lookup(User)		False	
+Last Modified Date	LastModifiedDate	Date/Time		False	
+Opportunity	OpportunityId	Lookup(Opportunity)		True	
+Revenue Share	RevenueShare	Currency(16, 2)
+
+
+
+
+
 @isTest
 private class CampaignMemberTriggerTest {
     
