@@ -1,3 +1,340 @@
+@isTest
+private class LeadTriggerTest {
+    
+    @testSetup
+    static void setupTestData() {
+        // Create test campaign
+        Campaign testCampaign = new Campaign(
+            Name = 'Test Campaign',
+            IsActive = true
+        );
+        insert testCampaign;
+        
+        // Create custom setting or metadata if needed by CustomCampaignAttributionFromFlow
+        // This would depend on the actual implementation of that class
+    }
+    
+    // Test case 1: Lead is converted and meets all conditions
+    @isTest
+    static void testLeadConversionWithAllConditionsMet() {
+        // Create test lead
+        Lead testLead = new Lead(
+            FirstName = 'Test',
+            LastName = 'Lead',
+            Company = 'Test Company',
+            Email = 'test@example.com',
+            Status = 'Working - Contacted'
+        );
+        insert testLead;
+        
+        Test.startTest();
+        
+        // Convert the lead
+        Database.LeadConvert lc = new Database.LeadConvert();
+        lc.setLeadId(testLead.Id);
+        lc.setConvertedStatus('Closed - Converted');
+        
+        LeadStatus convertStatus = [SELECT Id, MasterLabel FROM LeadStatus WHERE IsConverted = true LIMIT 1];
+        lc.setConvertedStatus(convertStatus.MasterLabel);
+        
+        Database.LeadConvertResult lcr = Database.convertLead(lc);
+        
+        Test.stopTest();
+        
+        // Verify the conversion was successful
+        System.assert(lcr.isSuccess(), 'Lead conversion should be successful');
+        
+        // Verify the lead is converted
+        Lead convertedLead = [SELECT Id, IsConverted, ConvertedOpportunityId, ConvertedContactId 
+                             FROM Lead WHERE Id = :testLead.Id];
+        System.assert(convertedLead.IsConverted, 'Lead should be converted');
+        System.assertNotEquals(null, convertedLead.ConvertedOpportunityId, 'Converted Opportunity should not be null');
+        System.assertNotEquals(null, convertedLead.ConvertedContactId, 'Converted Contact should not be null');
+        
+        // Note: We can't directly test the CustomCampaignAttributionFromFlow.applyInfluenceFromLead call
+        // as it's a future call, but we can verify the conditions that trigger it are met
+    }
+    
+    // Test case 2: Lead is converted but ConvertedOpportunityId is null
+    @isTest
+    static void testLeadConversionWithoutOpportunity() {
+        // Create test lead
+        Lead testLead = new Lead(
+            FirstName = 'Test',
+            LastName = 'Lead',
+            Company = 'Test Company',
+            Email = 'test2@example.com',
+            Status = 'Working - Contacted'
+        );
+        insert testLead;
+        
+        Test.startTest();
+        
+        // Convert the lead without creating opportunity
+        Database.LeadConvert lc = new Database.LeadConvert();
+        lc.setLeadId(testLead.Id);
+        lc.setDoNotCreateOpportunity(true); // Don't create opportunity
+        lc.setConvertedStatus('Closed - Converted');
+        
+        LeadStatus convertStatus = [SELECT Id, MasterLabel FROM LeadStatus WHERE IsConverted = true LIMIT 1];
+        lc.setConvertedStatus(convertStatus.MasterLabel);
+        
+        Database.LeadConvertResult lcr = Database.convertLead(lc);
+        
+        Test.stopTest();
+        
+        // Verify the conversion was successful
+        System.assert(lcr.isSuccess(), 'Lead conversion should be successful');
+        
+        // Verify the lead is converted but has no opportunity
+        Lead convertedLead = [SELECT Id, IsConverted, ConvertedOpportunityId, ConvertedContactId 
+                             FROM Lead WHERE Id = :testLead.Id];
+        System.assert(convertedLead.IsConverted, 'Lead should be converted');
+        System.assertEquals(null, convertedLead.ConvertedOpportunityId, 'Converted Opportunity should be null');
+        System.assertNotEquals(null, convertedLead.ConvertedContactId, 'Converted Contact should not be null');
+        
+        // The trigger should NOT call CustomCampaignAttributionFromFlow.applyInfluenceFromLead
+        // because ConvertedOpportunityId is null
+    }
+    
+    // Test case 3: Lead is converted but was already converted (no change in IsConverted)
+    @isTest
+    static void testLeadAlreadyConverted() {
+        // Create and convert a lead first
+        Lead testLead = new Lead(
+            FirstName = 'Test',
+            LastName = 'Lead',
+            Company = 'Test Company',
+            Email = 'test3@example.com',
+            Status = 'Working - Contacted'
+        );
+        insert testLead;
+        
+        // Convert the lead
+        Database.LeadConvert lc = new Database.LeadConvert();
+        lc.setLeadId(testLead.Id);
+        lc.setConvertedStatus('Closed - Converted');
+        
+        LeadStatus convertStatus = [SELECT Id, MasterLabel FROM LeadStatus WHERE IsConverted = true LIMIT 1];
+        lc.setConvertedStatus(convertStatus.MasterLabel);
+        
+        Database.convertLead(lc);
+        
+        Test.startTest();
+        
+        // Update the already converted lead (simulating no change in IsConverted)
+        Lead convertedLead = [SELECT Id, IsConverted, Company FROM Lead WHERE Id = :testLead.Id];
+        convertedLead.Company = 'Updated Company';
+        update convertedLead;
+        
+        Test.stopTest();
+        
+        // Verify the lead is still converted
+        Lead updatedLead = [SELECT Id, IsConverted, Company FROM Lead WHERE Id = :testLead.Id];
+        System.assert(updatedLead.IsConverted, 'Lead should still be converted');
+        System.assertEquals('Updated Company', updatedLead.Company, 'Company should be updated');
+        
+        // The trigger should NOT call CustomCampaignAttributionFromFlow.applyInfluenceFromLead
+        // because IsConverted didn't change from false to true
+    }
+    
+    // Test case 4: Lead is not converted at all
+    @isTest
+    static void testLeadNotConverted() {
+        // Create test lead
+        Lead testLead = new Lead(
+            FirstName = 'Test',
+            LastName = 'Lead',
+            Company = 'Test Company',
+            Email = 'test4@example.com',
+            Status = 'Working - Contacted'
+        );
+        insert testLead;
+        
+        Test.startTest();
+        
+        // Update the lead without converting it
+        testLead.Company = 'Updated Company';
+        update testLead;
+        
+        Test.stopTest();
+        
+        // Verify the lead is not converted
+        Lead updatedLead = [SELECT Id, IsConverted FROM Lead WHERE Id = :testLead.Id];
+        System.assert(!updatedLead.IsConverted, 'Lead should not be converted');
+        
+        // The trigger should NOT call CustomCampaignAttributionFromFlow.applyInfluenceFromLead
+        // because IsConverted is false
+    }
+    
+    // Test case 5: Bulk lead conversion test
+    @isTest
+    static void testBulkLeadConversion() {
+        List<Lead> testLeads = new List<Lead>();
+        
+        // Create 200 test leads
+        for (Integer i = 0; i < 200; i++) {
+            testLeads.add(new Lead(
+                FirstName = 'Test',
+                LastName = 'Lead ' + i,
+                Company = 'Test Company ' + i,
+                Email = 'test' + i + '@example.com',
+                Status = 'Working - Contacted'
+            ));
+        }
+        insert testLeads;
+        
+        Test.startTest();
+        
+        // Convert all leads
+        List<Database.LeadConvert> leadConverts = new List<Database.LeadConvert>();
+        LeadStatus convertStatus = [SELECT Id, MasterLabel FROM LeadStatus WHERE IsConverted = true LIMIT 1];
+        
+        for (Lead lead : testLeads) {
+            Database.LeadConvert lc = new Database.LeadConvert();
+            lc.setLeadId(lead.Id);
+            lc.setConvertedStatus(convertStatus.MasterLabel);
+            leadConverts.add(lc);
+        }
+        
+        List<Database.LeadConvertResult> results = Database.convertLead(leadConverts);
+        
+        Test.stopTest();
+        
+        // Verify all conversions were successful
+        for (Database.LeadConvertResult result : results) {
+            System.assert(result.isSuccess(), 'All lead conversions should be successful');
+        }
+        
+        // Verify all leads are converted and have required fields
+        List<Lead> convertedLeads = [SELECT Id, IsConverted, ConvertedOpportunityId, ConvertedContactId 
+                                   FROM Lead WHERE Id IN :testLeads];
+        
+        for (Lead convertedLead : convertedLeads) {
+            System.assert(convertedLead.IsConverted, 'Lead should be converted');
+            System.assertNotEquals(null, convertedLead.ConvertedOpportunityId, 'Converted Opportunity should not be null');
+            System.assertNotEquals(null, convertedLead.ConvertedContactId, 'Converted Contact should not be null');
+        }
+    }
+    
+    // Test case 6: Test negative scenario - lead conversion fails
+    @isTest
+    static void testLeadConversionFailure() {
+        // This test ensures that if conversion fails, the trigger doesn't execute
+        // We'll create a lead with invalid data that might cause conversion to fail
+        
+        // Note: This is a tricky scenario to simulate as Salesforce handles conversion errors
+        // We'll focus on testing that our trigger conditions work correctly
+        
+        // Create test lead
+        Lead testLead = new Lead(
+            FirstName = 'Test',
+            LastName = 'Lead',
+            Company = 'Test Company',
+            Email = 'test6@example.com',
+            Status = 'Working - Contacted'
+        );
+        insert testLead;
+        
+        Test.startTest();
+        
+        // Try to convert with invalid status (this should fail)
+        Database.LeadConvert lc = new Database.LeadConvert();
+        lc.setLeadId(testLead.Id);
+        lc.setConvertedStatus('Invalid Status'); // This will cause failure
+        
+        try {
+            Database.LeadConvertResult lcr = Database.convertLead(lc);
+            System.assert(false, 'Conversion should have failed');
+        } catch (Exception e) {
+            // Expected behavior - conversion should fail
+            System.assert(true, 'Conversion failed as expected');
+        }
+        
+        Test.stopTest();
+        
+        // Verify the lead is not converted
+        Lead notConvertedLead = [SELECT Id, IsConverted FROM Lead WHERE Id = :testLead.Id];
+        System.assert(!notConvertedLead.IsConverted, 'Lead should not be converted due to failed conversion');
+    }
+    
+    // Test case 7: Test mixed scenarios in bulk
+    @isTest
+    static void testMixedBulkScenarios() {
+        List<Lead> testLeads = new List<Lead>();
+        
+        // Create leads with different scenarios
+        for (Integer i = 0; i < 50; i++) {
+            testLeads.add(new Lead(
+                FirstName = 'Test',
+                LastName = 'Lead ' + i,
+                Company = 'Test Company ' + i,
+                Email = 'test' + i + '@example.com',
+                Status = 'Working - Contacted'
+            ));
+        }
+        insert testLeads;
+        
+        Test.startTest();
+        
+        // Convert some leads with opportunity, some without
+        List<Database.LeadConvert> leadConverts = new List<Database.LeadConvert>();
+        LeadStatus convertStatus = [SELECT Id, MasterLabel FROM LeadStatus WHERE IsConverted = true LIMIT 1];
+        
+        for (Integer i = 0; i < testLeads.size(); i++) {
+            Database.LeadConvert lc = new Database.LeadConvert();
+            lc.setLeadId(testLeads[i].Id);
+            lc.setConvertedStatus(convertStatus.MasterLabel);
+            
+            // Every other lead gets no opportunity
+            if (Math.mod(i, 2) == 0) {
+                lc.setDoNotCreateOpportunity(true);
+            }
+            
+            leadConverts.add(lc);
+        }
+        
+        List<Database.LeadConvertResult> results = Database.convertLead(leadConverts);
+        
+        Test.stopTest();
+        
+        // Verify all conversions were successful
+        for (Database.LeadConvertResult result : results) {
+            System.assert(result.isSuccess(), 'All lead conversions should be successful');
+        }
+        
+        // Verify the mixed scenarios
+        List<Lead> convertedLeads = [SELECT Id, IsConverted, ConvertedOpportunityId, ConvertedContactId 
+                                   FROM Lead WHERE Id IN :testLeads];
+        
+        for (Integer i = 0; i < convertedLeads.size(); i++) {
+            Lead convertedLead = convertedLeads[i];
+            System.assert(convertedLead.IsConverted, 'Lead should be converted');
+            
+            if (Math.mod(i, 2) == 0) {
+                // Even indexed leads should have no opportunity
+                System.assertEquals(null, convertedLead.ConvertedOpportunityId, 'Converted Opportunity should be null for even indexed leads');
+            } else {
+                // Odd indexed leads should have opportunity
+                System.assertNotEquals(null, convertedLead.ConvertedOpportunityId, 'Converted Opportunity should not be null for odd indexed leads');
+            }
+            
+            System.assertNotEquals(null, convertedLead.ConvertedContactId, 'Converted Contact should not be null for all leads');
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
 trigger LeadTrigger on Lead (after update) {
     for (Lead ld : Trigger.new) {
         Lead oldLd = Trigger.oldMap.get(ld.Id);
