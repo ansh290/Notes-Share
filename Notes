@@ -1,224 +1,235 @@
-public with sharing class PeopleController {
-
-    // ---------------------------
-    // WRAPPERS
-    // ---------------------------
-    public class PeopleWrapper {
-        @AuraEnabled public Id userId;
-        @AuraEnabled public String name;           
-        @AuraEnabled public String contactName;    
-        @AuraEnabled public String photoUrl;
-        @AuraEnabled public String chapterName;   
-        @AuraEnabled public List<String> hostelNames; 
-        @AuraEnabled public Boolean isFollowed;
-
-        public PeopleWrapper(Id uId, String uName, String cName, String uPhoto, String chName, List<String> hNames, Boolean followed) {
-            userId = uId;
-            name = uName;
-            contactName = cName;
-            photoUrl = uPhoto;
-            chapterName = chName;
-            hostelNames = hNames == null ? new List<String>() : hNames;
-            isFollowed = followed;
-        }
-    }
-
-    public class HostelWrapper {
-        @AuraEnabled public Id hostelMasterId;
-        @AuraEnabled public String hostelName;
-        public HostelWrapper(Id id, String name) { 
-            hostelMasterId = id; 
-            hostelName = name; 
-        }
-    }
-
-    public class ChapterWrapper {
-        @AuraEnabled public Id chapterMasterId;
-        @AuraEnabled public String chapterName;
-        public ChapterWrapper(Id id, String name) { 
-            chapterMasterId = id; 
-            chapterName = name; 
-        }
-    }
-
-    // ---------------------------
-    // PUBLIC: Default users (no filters)
-    // ---------------------------
-    @AuraEnabled(cacheable=true)
-    public static List<PeopleWrapper> getCustomerUsers() {
-        List<User> users = [
-            SELECT Id, Name, SmallPhotoUrl, ContactId, Contact.Name, 
-                   Contact.Chapter__c, Contact.Chapter__r.Name,
-                   Contact.Hostel__c, Contact.Hostel__r.Name
-            FROM User
-            WHERE IsActive = true
-            AND Profile.UserLicense.Name = 'Customer Community'
-            AND Id != :UserInfo.getUserId()
-            AND ContactId != NULL
-            ORDER BY Contact.Name ASC NULLS LAST
-            LIMIT 6
-        ];
-        return buildWrappersFromUsers(users);
-    }
-
-    // ---------------------------
-    // PUBLIC: Search users with filters
-    // ---------------------------
-    @AuraEnabled(cacheable=false)
-    public static List<PeopleWrapper> getSearchUsers(String searchKey, Id chapterId, Id hostelId) {
-        String baseQuery = 'SELECT Id, Name, SmallPhotoUrl, ContactId, Contact.Name, ' +
-                           'Contact.Chapter__c, Contact.Chapter__r.Name, ' +
-                           'Contact.Hostel__c, Contact.Hostel__r.Name ' +
-                           'FROM User WHERE IsActive = true AND Profile.UserLicense.Name = \'Customer Community\' ' +
-                           'AND Id != \'' + UserInfo.getUserId() + '\' AND ContactId != NULL';
-
-        if (String.isNotBlank(searchKey)) {
-            String key = '%' + searchKey.trim() + '%';
-            baseQuery += ' AND (Name LIKE \'' + String.escapeSingleQuotes(key) + 
-                         '\' OR CommunityNickname LIKE \'' + String.escapeSingleQuotes(key) + 
-                         '\' OR Contact.Name LIKE \'' + String.escapeSingleQuotes(key) + '\')';
-        }
-
-        baseQuery += ' ORDER BY Contact.Name ASC NULLS LAST LIMIT 200';
-        List<User> users = Database.query(baseQuery);
-
-        List<User> filtered = new List<User>();
-        for (User u : users) {
-            if (u.ContactId == null) continue;
-
-            Boolean match = true;
-            if (chapterId != null && u.Contact.Chapter__c != chapterId) match = false;
-            if (hostelId != null && u.Contact.Hostel__c != hostelId) match = false;
-
-            if (match) filtered.add(u);
-        }
-
-        return buildWrappersFromUsers(filtered);
-    }
-      
-    // ---------------------------
-    // Follow / Unfollow
-    // ---------------------------
-    @AuraEnabled
-    public static void followUser(Id targetUserId) {
-        if (targetUserId == null || targetUserId == UserInfo.getUserId()) return;
-
-        List<EntitySubscription> existing = [
-            SELECT Id FROM EntitySubscription
-            WHERE SubscriberId = :UserInfo.getUserId()
-            AND ParentId = :targetUserId
-            LIMIT 1
-        ];
+@IsTest
+public class PeopleControllerTest {
+    
+    @TestSetup
+    static void setupTestData() {
+        // Create test Chapter
+        Chapter__c testChapter = new Chapter__c(Name = 'Test Chapter');
+        insert testChapter;
         
-        if (existing.isEmpty()) {
-            EntitySubscription newSub = new EntitySubscription(
-                SubscriberId = UserInfo.getUserId(),
-                ParentId     = targetUserId
-            );
+        // Create test Hostel
+        Hostel_Detail__c testHostel = new Hostel_Detail__c(Name = 'Test Hostel');
+        insert testHostel;
+        
+        // Create test Contact
+        Contact testContact = new Contact(
+            FirstName = 'Test',
+            LastName = 'User',
+            Email = 'test.user@example.com',
+            Chapter__c = testChapter.Id,
+            Hostel__c = testHostel.Id
+        );
+        insert testContact;
+        
+        // Get Customer Community profile
+        Profile communityProfile = [SELECT Id FROM Profile WHERE UserLicense.Name = 'Customer Community' LIMIT 1];
+        
+        // Create test User
+        User testUser = new User(
+            FirstName = 'Test',
+            LastName = 'User',
+            Email = 'test.user@example.com',
+            Username = 'test.user@example.com' + System.currentTimeMillis(),
+            Alias = 'tuser',
+            TimeZoneSidKey = 'America/Los_Angeles',
+            LocaleSidKey = 'en_US',
+            EmailEncodingKey = 'UTF-8',
+            ProfileId = communityProfile.Id,
+            LanguageLocaleKey = 'en_US',
+            ContactId = testContact.Id
+        );
+        insert testUser;
+    }
+    
+    @IsTest
+    static void testGetCustomerUsers() {
+        User testUser = [SELECT Id FROM User WHERE Username LIKE 'test.user@example.com%' LIMIT 1];
+        
+        Test.startTest();
+        System.runAs(testUser) {
+            List<PeopleController.PeopleWrapper> result = PeopleController.getCustomerUsers();
+            System.assertNotEquals(null, result, 'Should return a list of users');
+            System.assert(result.size() <= 6, 'Should return at most 6 users');
+        }
+        Test.stopTest();
+    }
+    
+    @IsTest
+    static void testGetSearchUsers() {
+        User testUser = [SELECT Id FROM User WHERE Username LIKE 'test.user@example.com%' LIMIT 1];
+        Chapter__c testChapter = [SELECT Id FROM Chapter__c LIMIT 1];
+        Hostel_Detail__c testHostel = [SELECT Id FROM Hostel_Detail__c LIMIT 1];
+        
+        Test.startTest();
+        System.runAs(testUser) {
+            // Test search with no filters
+            List<PeopleController.PeopleWrapper> result1 = PeopleController.getSearchUsers('Test', null, null);
+            System.assertNotEquals(null, result1, 'Should return search results');
             
-            Id networkId = Network.getNetworkId();
-            if (networkId != null) {
-                newSub.NetworkId = networkId;
-            }
+            // Test search with chapter filter
+            List<PeopleController.PeopleWrapper> result2 = PeopleController.getSearchUsers('Test', testChapter.Id, null);
+            System.assertNotEquals(null, result2, 'Should return search results with chapter filter');
             
-            insert newSub;
+            // Test search with hostel filter
+            List<PeopleController.PeopleWrapper> result3 = PeopleController.getSearchUsers('Test', null, testHostel.Id);
+            System.assertNotEquals(null, result3, 'Should return search results with hostel filter');
+            
+            // Test search with both filters
+            List<PeopleController.PeopleWrapper> result4 = PeopleController.getSearchUsers('Test', testChapter.Id, testHostel.Id);
+            System.assertNotEquals(null, result4, 'Should return search results with both filters');
         }
+        Test.stopTest();
     }
-
-    @AuraEnabled
-    public static void unfollowUser(Id targetUserId) {
-        if (targetUserId == null) return;
+    
+    @IsTest
+    static void testFollowAndUnfollowUser() {
+        User testUser = [SELECT Id FROM User WHERE Username LIKE 'test.user@example.com%' LIMIT 1];
         
-        List<EntitySubscription> subs = [
-            SELECT Id FROM EntitySubscription
-            WHERE SubscriberId = :UserInfo.getUserId()
-            AND ParentId = :targetUserId
-            LIMIT 1
-        ];
+        // Create a second user to follow
+        Contact testContact2 = new Contact(
+            FirstName = 'Test2',
+            LastName = 'User2',
+            Email = 'test2.user2@example.com'
+        );
+        insert testContact2;
         
-        if (!subs.isEmpty()) {
-            delete subs;
+        Profile communityProfile = [SELECT Id FROM Profile WHERE UserLicense.Name = 'Customer Community' LIMIT 1];
+        
+        User testUser2 = new User(
+            FirstName = 'Test2',
+            LastName = 'User2',
+            Email = 'test2.user2@example.com',
+            Username = 'test2.user2@example.com' + System.currentTimeMillis(),
+            Alias = 'tuser2',
+            TimeZoneSidKey = 'America/Los_Angeles',
+            LocaleSidKey = 'en_US',
+            EmailEncodingKey = 'UTF-8',
+            ProfileId = communityProfile.Id,
+            LanguageLocaleKey = 'en_US',
+            ContactId = testContact2.Id
+        );
+        insert testUser2;
+        
+        Test.startTest();
+        System.runAs(testUser) {
+            // Test follow user
+            PeopleController.followUser(testUser2.Id);
+            
+            // Verify follow was created
+            List<EntitySubscription> subscriptions = [
+                SELECT Id FROM EntitySubscription 
+                WHERE SubscriberId = :testUser.Id AND ParentId = :testUser2.Id
+            ];
+            System.assertEquals(1, subscriptions.size(), 'Should have created a follow relationship');
+            
+            // Test unfollow user
+            PeopleController.unfollowUser(testUser2.Id);
+            
+            // Verify unfollow worked
+            subscriptions = [
+                SELECT Id FROM EntitySubscription 
+                WHERE SubscriberId = :testUser.Id AND ParentId = :testUser2.Id
+            ];
+            System.assertEquals(0, subscriptions.size(), 'Should have removed the follow relationship');
         }
+        Test.stopTest();
     }
-
-    // ---------------------------
-    // PUBLIC: Get Hostels for dropdown
-    // ---------------------------
-    @AuraEnabled(cacheable=true)
-    public static List<HostelWrapper> getHostels() {
-        List<HostelWrapper> result = new List<HostelWrapper>();
-        if (!Schema.getGlobalDescribe().containsKey('Hostel_Detail__c')) return result;
-
-        for (Hostel_Detail__c h : [
-            SELECT Id, Name 
-            FROM Hostel_Detail__c 
-            ORDER BY Name ASC 
-            LIMIT 2000
-        ]) {
-            result.add(new HostelWrapper(h.Id, h.Name));
+    
+    @IsTest
+    static void testGetHostels() {
+        User testUser = [SELECT Id FROM User WHERE Username LIKE 'test.user@example.com%' LIMIT 1];
+        
+        Test.startTest();
+        System.runAs(testUser) {
+            List<PeopleController.HostelWrapper> result = PeopleController.getHostels();
+            System.assertNotEquals(null, result, 'Should return a list of hostels');
+            System.assertEquals(1, result.size(), 'Should return the test hostel');
+            System.assertEquals('Test Hostel', result[0].hostelName, 'Should return the correct hostel name');
         }
-        return result;
+        Test.stopTest();
     }
-
-    // ---------------------------
-    // PUBLIC: Get Chapters for dropdown
-    // ---------------------------
-    @AuraEnabled(cacheable=true)
-    public static List<ChapterWrapper> getChapters() {
-        List<ChapterWrapper> result = new List<ChapterWrapper>();
-        if (!Schema.getGlobalDescribe().containsKey('Chapter__c')) return result;
-
-        for (Chapter__c c : [
-            SELECT Id, Name 
-            FROM Chapter__c 
-            ORDER BY Name ASC 
-            LIMIT 2000
-        ]) {
-            result.add(new ChapterWrapper(c.Id, c.Name));
+    
+    @IsTest
+    static void testGetChapters() {
+        User testUser = [SELECT Id FROM User WHERE Username LIKE 'test.user@example.com%' LIMIT 1];
+        
+        Test.startTest();
+        System.runAs(testUser) {
+            List<PeopleController.ChapterWrapper> result = PeopleController.getChapters();
+            System.assertNotEquals(null, result, 'Should return a list of chapters');
+            System.assertEquals(1, result.size(), 'Should return the test chapter');
+            System.assertEquals('Test Chapter', result[0].chapterName, 'Should return the correct chapter name');
         }
-        return result;
+        Test.stopTest();
     }
-
-    // ---------------------------
-    // PRIVATE HELPERS
-    // ---------------------------
-    private static List<PeopleWrapper> buildWrappersFromUsers(List<User> users) {
-        List<PeopleWrapper> result = new List<PeopleWrapper>();
-        if (users == null || users.isEmpty()) return result;
-
-        Set<Id> followedUserIds = new Set<Id>();
-        try {
-            for (EntitySubscription subscription : [
-                SELECT ParentId FROM EntitySubscription 
-                WHERE SubscriberId = :UserInfo.getUserId() 
-                LIMIT 1000
-            ]) {
-                followedUserIds.add(subscription.ParentId);
+    
+    @IsTest
+    static void testBuildWrappersFromUsers() {
+        User testUser = [SELECT Id FROM User WHERE Username LIKE 'test.user@example.com%' LIMIT 1];
+        List<User> users = [SELECT Id, Name, SmallPhotoUrl, ContactId, Contact.Name, 
+                            Contact.Chapter__c, Contact.Chapter__r.Name,
+                            Contact.Hostel__c, Contact.Hostel__r.Name
+                            FROM User WHERE Id = :testUser.Id];
+        
+        Test.startTest();
+        System.runAs(testUser) {
+            List<PeopleController.PeopleWrapper> result = PeopleController.buildWrappersFromUsers(users);
+            System.assertNotEquals(null, result, 'Should return a list of wrapped users');
+            System.assertEquals(1, result.size(), 'Should return the test user');
+            System.assertEquals('Test User', result[0].contactName, 'Should return the correct contact name');
+            System.assertEquals('Test Chapter', result[0].chapterName, 'Should return the correct chapter name');
+            System.assertEquals(1, result[0].hostelNames.size(), 'Should return hostel names');
+            System.assertEquals('Test Hostel', result[0].hostelNames[0], 'Should return the correct hostel name');
+        }
+        Test.stopTest();
+    }
+    
+    @IsTest
+    static void testEmptyBuildWrappersFromUsers() {
+        User testUser = [SELECT Id FROM User WHERE Username LIKE 'test.user@example.com%' LIMIT 1];
+        
+        Test.startTest();
+        System.runAs(testUser) {
+            List<PeopleController.PeopleWrapper> result = PeopleController.buildWrappersFromUsers(new List<User>());
+            System.assertNotEquals(null, result, 'Should return an empty list');
+            System.assertEquals(0, result.size(), 'Should return no users');
+        }
+        Test.stopTest();
+    }
+    
+    @IsTest
+    static void testFollowSelfShouldNotWork() {
+        User testUser = [SELECT Id FROM User WHERE Username LIKE 'test.user@example.com%' LIMIT 1];
+        
+        Test.startTest();
+        System.runAs(testUser) {
+            // Try to follow self
+            PeopleController.followUser(testUser.Id);
+            
+            // Verify no follow was created
+            List<EntitySubscription> subscriptions = [
+                SELECT Id FROM EntitySubscription 
+                WHERE SubscriberId = :testUser.Id AND ParentId = :testUser.Id
+            ];
+            System.assertEquals(0, subscriptions.size(), 'Should not allow following yourself');
+        }
+        Test.stopTest();
+    }
+    
+    @IsTest
+    static void testUnfollowNonExistentShouldNotFail() {
+        User testUser = [SELECT Id FROM User WHERE Username LIKE 'test.user@example.com%' LIMIT 1];
+        
+        Test.startTest();
+        System.runAs(testUser) {
+            // Try to unfollow a user that doesn't exist
+            try {
+                PeopleController.unfollowUser(null);
+                System.assert(true, 'Should handle null user ID gracefully');
+            } catch (Exception e) {
+                System.assert(false, 'Should not throw exception for null user ID: ' + e.getMessage());
             }
-        } catch (Exception ex) {
-            System.debug('Error loading followed users: ' + ex.getMessage());
         }
-
-        for (User user : users) {
-            String contactName = user.Contact != null ? user.Contact.Name : user.Name;
-            String chapterName = (user.Contact != null && user.Contact.Chapter__r != null) 
-                                 ? user.Contact.Chapter__r.Name : null;
-            List<String> hostelNames = new List<String>();
-            if (user.Contact != null && user.Contact.Hostel__r != null) {
-                hostelNames.add(user.Contact.Hostel__r.Name);
-            }
-
-            result.add(new PeopleWrapper(
-                user.Id,
-                user.Name,
-                contactName,
-                user.SmallPhotoUrl,
-                chapterName,
-                hostelNames,
-                followedUserIds.contains(user.Id)
-            ));
-        }
-
-        return result;
+        Test.stopTest();
     }
 }
