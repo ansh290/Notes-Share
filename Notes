@@ -1,1236 +1,224 @@
-@isTest
-private class CampaignMemberTriggerTest {
-    
-    @testSetup
-    static void setupTestData() {
-        // Create test accounts
-        List<Account> testAccounts = new List<Account>();
-        for (Integer i = 0; i < 3; i++) {
-            testAccounts.add(new Account(Name = 'Test Account ' + i));
+public with sharing class PeopleController {
+
+    // ---------------------------
+    // WRAPPERS
+    // ---------------------------
+    public class PeopleWrapper {
+        @AuraEnabled public Id userId;
+        @AuraEnabled public String name;           
+        @AuraEnabled public String contactName;    
+        @AuraEnabled public String photoUrl;
+        @AuraEnabled public String chapterName;   
+        @AuraEnabled public List<String> hostelNames; 
+        @AuraEnabled public Boolean isFollowed;
+
+        public PeopleWrapper(Id uId, String uName, String cName, String uPhoto, String chName, List<String> hNames, Boolean followed) {
+            userId = uId;
+            name = uName;
+            contactName = cName;
+            photoUrl = uPhoto;
+            chapterName = chName;
+            hostelNames = hNames == null ? new List<String>() : hNames;
+            isFollowed = followed;
         }
-        insert testAccounts;
-        
-        // Create test contacts
-        List<Contact> testContacts = new List<Contact>();
-        for (Integer i = 0; i < 6; i++) {
-            testContacts.add(new Contact(
-                FirstName = 'Test',
-                LastName = 'Contact ' + i,
-                AccountId = testAccounts[Math.mod(i, 3)].Id
-            ));
+    }
+
+    public class HostelWrapper {
+        @AuraEnabled public Id hostelMasterId;
+        @AuraEnabled public String hostelName;
+        public HostelWrapper(Id id, String name) { 
+            hostelMasterId = id; 
+            hostelName = name; 
         }
-        insert testContacts;
-        
-        // Create test campaigns
-        List<Campaign> testCampaigns = new List<Campaign>();
-        for (Integer i = 0; i < 2; i++) {
-            testCampaigns.add(new Campaign(
-                Name = 'Test Campaign ' + i,
-                IsActive = true
-            ));
+    }
+
+    public class ChapterWrapper {
+        @AuraEnabled public Id chapterMasterId;
+        @AuraEnabled public String chapterName;
+        public ChapterWrapper(Id id, String name) { 
+            chapterMasterId = id; 
+            chapterName = name; 
         }
-        insert testCampaigns;
-        
-        // Create test opportunities in 'Build Value' stage
-        List<Opportunity> testOpportunities = new List<Opportunity>();
-        Date today = Date.today();
-        for (Integer i = 0; i < 3; i++) {
-            testOpportunities.add(new Opportunity(
-                Name = 'Test Opp ' + i,
-                AccountId = testAccounts[i].Id,
-                StageName = 'Build Value',
-                CloseDate = today.addDays(30),
-                Amount = 10000
-            ));
+    }
+
+    // ---------------------------
+    // PUBLIC: Default users (no filters)
+    // ---------------------------
+    @AuraEnabled(cacheable=true)
+    public static List<PeopleWrapper> getCustomerUsers() {
+        List<User> users = [
+            SELECT Id, Name, SmallPhotoUrl, ContactId, Contact.Name, 
+                   Contact.Chapter__c, Contact.Chapter__r.Name,
+                   Contact.Hostel__c, Contact.Hostel__r.Name
+            FROM User
+            WHERE IsActive = true
+            AND Profile.UserLicense.Name = 'Customer Community'
+            AND Id != :UserInfo.getUserId()
+            AND ContactId != NULL
+            ORDER BY Contact.Name ASC NULLS LAST
+            LIMIT 6
+        ];
+        return buildWrappersFromUsers(users);
+    }
+
+    // ---------------------------
+    // PUBLIC: Search users with filters
+    // ---------------------------
+    @AuraEnabled(cacheable=false)
+    public static List<PeopleWrapper> getSearchUsers(String searchKey, Id chapterId, Id hostelId) {
+        String baseQuery = 'SELECT Id, Name, SmallPhotoUrl, ContactId, Contact.Name, ' +
+                           'Contact.Chapter__c, Contact.Chapter__r.Name, ' +
+                           'Contact.Hostel__c, Contact.Hostel__r.Name ' +
+                           'FROM User WHERE IsActive = true AND Profile.UserLicense.Name = \'Customer Community\' ' +
+                           'AND Id != \'' + UserInfo.getUserId() + '\' AND ContactId != NULL';
+
+        if (String.isNotBlank(searchKey)) {
+            String key = '%' + searchKey.trim() + '%';
+            baseQuery += ' AND (Name LIKE \'' + String.escapeSingleQuotes(key) + 
+                         '\' OR CommunityNickname LIKE \'' + String.escapeSingleQuotes(key) + 
+                         '\' OR Contact.Name LIKE \'' + String.escapeSingleQuotes(key) + '\')';
         }
-        insert testOpportunities;
-        
-        // Set created dates for opportunities to control the date difference
-        Test.setCreatedDate(testOpportunities[0].Id, DateTime.now().addDays(-30));
-        Test.setCreatedDate(testOpportunities[1].Id, DateTime.now().addDays(-60));
-        Test.setCreatedDate(testOpportunities[2].Id, DateTime.now().addDays(-100)); // Outside 90-day window
-    }
-    
-    // Test case 1: CampaignMember with Status = 'Responded' and valid ContactId
-    @isTest
-    static void testCampaignMemberRespondedWithValidContact() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        Test.startTest();
-        
-        // Create CampaignMember with Status = 'Responded'
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify CampaignInfluence was created
-        List<CampaignInfluence> influences = [
-            SELECT Id, OpportunityId, CampaignId, ContactId, Influence 
-            FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
-        ];
-        
-        System.assert(influences.size() > 0, 'Should create at least one CampaignInfluence record');
-        System.assertEquals(30.00, influences[0].Influence, 'Influence should be 30.00');
-    }
-    
-    // Test case 2: CampaignMember with Status != 'Responded' (should not trigger)
-    @isTest
-    static void testCampaignMemberNotResponded() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        Test.startTest();
-        
-        // Create CampaignMember with Status != 'Responded'
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Sent'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify no CampaignInfluence was created
-        List<CampaignInfluence> influences = [
-            SELECT Id FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
-        ];
-        
-        System.assertEquals(0, influences.size(), 'Should not create CampaignInfluence for non-responded status');
-    }
-    
-    // Test case 3: CampaignMember without ContactId (should not trigger)
-    @isTest
-    static void testCampaignMemberWithoutContactId() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        
-        Test.startTest();
-        
-        // Create CampaignMember without ContactId
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify no CampaignInfluence was created
-        List<CampaignInfluence> influences = [SELECT Id FROM CampaignInfluence];
-        System.assertEquals(0, influences.size(), 'Should not create CampaignInfluence without ContactId');
-    }
-    
-    // Test case 4: Contact without Account (should not trigger)
-    @isTest
-    static void testContactWithoutAccount() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        
-        // Create contact without account
-        Contact noAccountContact = new Contact(
-            FirstName = 'No',
-            LastName = 'Account',
-            Email = 'noaccount@test.com'
-        );
-        insert noAccountContact;
-        
-        Test.startTest();
-        
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = noAccountContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify no CampaignInfluence was created
-        List<CampaignInfluence> influences = [
-            SELECT Id FROM CampaignInfluence 
-            WHERE ContactId = :noAccountContact.Id
-        ];
-        
-        System.assertEquals(0, influences.size(), 'Should not create CampaignInfluence for contact without account');
-    }
-    
-    // Test case 5: Opportunity created date outside 90-day window (should not trigger)
-    @isTest
-    static void testOpportunityOutside90DayWindow() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 2' LIMIT 1];
-        
-        Test.startTest();
-        
-        // Create CampaignMember with current date (outside 90-day window of the opportunity)
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify no CampaignInfluence was created (outside date range)
-        List<CampaignInfluence> influences = [
-            SELECT Id FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
-        ];
-        
-        System.assertEquals(0, influences.size(), 'Should not create CampaignInfluence outside 90-day window');
-    }
-    
-    // Test case 6: Influence sum would exceed 100% (should not trigger)
-    @isTest
-    static void testInfluenceSumExceeds100() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        Opportunity testOpp = [SELECT Id FROM Opportunity WHERE AccountId = :testContact.AccountId LIMIT 1];
-        
-        // Create existing CampaignInfluence with 80% influence
-        CampaignInfluence existingInfluence = new CampaignInfluence(
-            OpportunityId = testOpp.Id,
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Influence = 80.00
-        );
-        insert existingInfluence;
-        
-        Test.startTest();
-        
-        // Create another CampaignMember that would add 30% (total 110% - should not create)
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify only the original CampaignInfluence exists
-        List<CampaignInfluence> influences = [
-            SELECT Id, Influence FROM CampaignInfluence 
-            WHERE OpportunityId = :testOpp.Id
-            ORDER BY CreatedDate
-        ];
-        
-        System.assertEquals(1, influences.size(), 'Should not create additional CampaignInfluence if sum exceeds 100%');
-        System.assertEquals(80.00, influences[0].Influence, 'Original influence should remain unchanged');
-    }
-    
-    // Test case 7: Bulk CampaignMember processing
-    @isTest
-    static void testBulkCampaignMemberProcessing() {
-        List<Campaign> campaigns = [SELECT Id FROM Campaign];
-        List<Contact> contacts = [SELECT Id, AccountId FROM Contact WHERE AccountId != null];
-        
-        Test.startTest();
-        
-        // Create multiple CampaignMembers in bulk
-        List<CampaignMember> cmList = new List<CampaignMember>();
-        for (Integer i = 0; i < 20; i++) {
-            cmList.add(new CampaignMember(
-                CampaignId = campaigns[Math.mod(i, 2)].Id,
-                ContactId = contacts[Math.mod(i, contacts.size())].Id,
-                Status = 'Responded'
-            ));
+
+        baseQuery += ' ORDER BY Contact.Name ASC NULLS LAST LIMIT 200';
+        List<User> users = Database.query(baseQuery);
+
+        List<User> filtered = new List<User>();
+        for (User u : users) {
+            if (u.ContactId == null) continue;
+
+            Boolean match = true;
+            if (chapterId != null && u.Contact.Chapter__c != chapterId) match = false;
+            if (hostelId != null && u.Contact.Hostel__c != hostelId) match = false;
+
+            if (match) filtered.add(u);
         }
-        insert cmList;
-        
-        Test.stopTest();
-        
-        // Verify CampaignInfluence records were created
-        List<CampaignInfluence> influences = [SELECT Id FROM CampaignInfluence];
-        System.assert(influences.size() > 0, 'Should create CampaignInfluence records in bulk');
+
+        return buildWrappersFromUsers(filtered);
     }
-    
-    // Test case 8: Update CampaignMember to 'Responded' status
-    @isTest
-    static void testUpdateCampaignMemberToResponded() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        // Create CampaignMember with non-responded status first
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Sent'
-        );
-        insert cm;
-        
-        Test.startTest();
-        
-        // Update to 'Responded' status
-        cm.Status = 'Responded';
-        update cm;
-        
-        Test.stopTest();
-        
-        // Verify CampaignInfluence was created on update
-        List<CampaignInfluence> influences = [
-            SELECT Id FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
+      
+    // ---------------------------
+    // Follow / Unfollow
+    // ---------------------------
+    @AuraEnabled
+    public static void followUser(Id targetUserId) {
+        if (targetUserId == null || targetUserId == UserInfo.getUserId()) return;
+
+        List<EntitySubscription> existing = [
+            SELECT Id FROM EntitySubscription
+            WHERE SubscriberId = :UserInfo.getUserId()
+            AND ParentId = :targetUserId
+            LIMIT 1
         ];
         
-        System.assertEquals(1, influences.size(), 'Should create CampaignInfluence when updated to Responded status');
-    }
-    
-    // Test case 9: Test with existing CampaignInfluence records
-    @isTest
-    static void testWithExistingCampaignInfluence() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        Opportunity testOpp = [SELECT Id FROM Opportunity WHERE AccountId = :testContact.AccountId LIMIT 1];
-        
-        // Create existing CampaignInfluence with 50% influence
-        CampaignInfluence existingInfluence = new CampaignInfluence(
-            OpportunityId = testOpp.Id,
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Influence = 50.00
-        );
-        insert existingInfluence;
-        
-        Test.startTest();
-        
-        // Create CampaignMember that would add 30% (total 80%)
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify both CampaignInfluence records exist
-        List<CampaignInfluence> influences = [
-            SELECT Id, Influence FROM CampaignInfluence 
-            WHERE OpportunityId = :testOpp.Id
-            ORDER BY CreatedDate
-        ];
-        
-        System.assertEquals(2, influences.size(), 'Should create both CampaignInfluence records');
-        
-        // Calculate total influence
-        Decimal totalInfluence = 0;
-        for (CampaignInfluence ci : influences) {
-            totalInfluence += ci.Influence;
-        }
-        
-        System.assertEquals(80.00, totalInfluence, 'Total influence should be 80.00');
-    }
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-fields in campaign Influence 
-
-Fields & Relationships
-SortField LabelSorted Ascending	SortField Name	SortData Type	SortControlling Field	SortIndexed	Actions
-Campaign	CampaignId	Lookup(Campaign)		False	
-Campaign Influence Model	ModelId	Lookup(Campaign Influence Model)		False	
-Contact	ContactId	Lookup(Contact)		False	
-Created By	CreatedById	Lookup(User)		True	
-Created Date	CreatedDate	Date/Time		True	
-Influence (%)	Influence	Percent(3, 2)		False	
-Last Modified By	LastModifiedById	Lookup(User)		False	
-Last Modified Date	LastModifiedDate	Date/Time		False	
-Opportunity	OpportunityId	Lookup(Opportunity)		True	
-Revenue Share	RevenueShare	Currency(16, 2)
-
-
-
-
-
-@isTest
-private class CampaignMemberTriggerTest {
-    
-    @testSetup
-    static void setupTestData() {
-        // Create test accounts
-        List<Account> testAccounts = new List<Account>();
-        for (Integer i = 0; i < 3; i++) {
-            testAccounts.add(new Account(Name = 'Test Account ' + i));
-        }
-        insert testAccounts;
-        
-        // Create test contacts
-        List<Contact> testContacts = new List<Contact>();
-        for (Integer i = 0; i < 6; i++) {
-            testContacts.add(new Contact(
-                FirstName = 'Test',
-                LastName = 'Contact ' + i,
-                AccountId = testAccounts[Math.mod(i, 3)].Id
-            ));
-        }
-        insert testContacts;
-        
-        // Create test campaigns
-        List<Campaign> testCampaigns = new List<Campaign>();
-        for (Integer i = 0; i < 2; i++) {
-            testCampaigns.add(new Campaign(
-                Name = 'Test Campaign ' + i,
-                IsActive = true
-            ));
-        }
-        insert testCampaigns;
-        
-        // Create test opportunities in 'Build Value' stage
-        List<Opportunity> testOpportunities = new List<Opportunity>();
-        Date today = Date.today();
-        for (Integer i = 0; i < 3; i++) {
-            testOpportunities.add(new Opportunity(
-                Name = 'Test Opp ' + i,
-                AccountId = testAccounts[i].Id,
-                StageName = 'Build Value',
-                CloseDate = today.addDays(30),
-                Amount = 10000
-            ));
-        }
-        insert testOpportunities;
-        
-        // Set created dates for opportunities to control the date difference
-        Test.setCreatedDate(testOpportunities[0].Id, DateTime.now().addDays(-30));
-        Test.setCreatedDate(testOpportunities[1].Id, DateTime.now().addDays(-60));
-        Test.setCreatedDate(testOpportunities[2].Id, DateTime.now().addDays(-100)); // Outside 90-day window
-    }
-    
-    // Test case 1: CampaignMember with Status = 'Responded' and valid ContactId
-    @isTest
-    static void testCampaignMemberRespondedWithValidContact() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        Test.startTest();
-        
-        // Create CampaignMember with Status = 'Responded'
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify CampaignInfluence was created
-        List<CampaignInfluence> influences = [
-            SELECT Id, OpportunityId, CampaignId, ContactId, Influence 
-            FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
-        ];
-        
-        System.assert(influences.size() > 0, 'Should create at least one CampaignInfluence record');
-        System.assertEquals(30, influences[0].Influence, 'Influence should be 30');
-    }
-    
-    // Test case 2: CampaignMember with Status != 'Responded' (should not trigger)
-    @isTest
-    static void testCampaignMemberNotResponded() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        Test.startTest();
-        
-        // Create CampaignMember with Status != 'Responded'
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Sent'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify no CampaignInfluence was created
-        List<CampaignInfluence> influences = [
-            SELECT Id FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
-        ];
-        
-        System.assertEquals(0, influences.size(), 'Should not create CampaignInfluence for non-responded status');
-    }
-    
-    // Test case 3: CampaignMember without ContactId (should not trigger)
-    @isTest
-    static void testCampaignMemberWithoutContactId() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        
-        Test.startTest();
-        
-        // Create CampaignMember without ContactId (LeadId instead)
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            Status = 'Responded'
-            // No ContactId - should not trigger
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify no CampaignInfluence was created
-        List<CampaignInfluence> influences = [SELECT Id FROM CampaignInfluence];
-        System.assertEquals(0, influences.size(), 'Should not create CampaignInfluence without ContactId');
-    }
-    
-    // Test case 4: Contact without Account (should not trigger)
-    @isTest
-    static void testContactWithoutAccount() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        
-        // Create contact without account
-        Contact noAccountContact = new Contact(
-            FirstName = 'No',
-            LastName = 'Account',
-            Email = 'noaccount@test.com'
-        );
-        insert noAccountContact;
-        
-        Test.startTest();
-        
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = noAccountContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify no CampaignInfluence was created
-        List<CampaignInfluence> influences = [
-            SELECT Id FROM CampaignInfluence 
-            WHERE ContactId = :noAccountContact.Id
-        ];
-        
-        System.assertEquals(0, influences.size(), 'Should not create CampaignInfluence for contact without account');
-    }
-    
-    // Test case 5: Opportunity created date outside 90-day window (should not trigger)
-    @isTest
-    static void testOpportunityOutside90DayWindow() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 2' LIMIT 1];
-        
-        Test.startTest();
-        
-        // Create CampaignMember with current date (outside 90-day window of the opportunity)
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify no CampaignInfluence was created (outside date range)
-        List<CampaignInfluence> influences = [
-            SELECT Id FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
-        ];
-        
-        System.assertEquals(0, influences.size(), 'Should not create CampaignInfluence outside 90-day window');
-    }
-    
-    // Test case 6: Influence sum would exceed 100% (should not trigger)
-    @isTest
-    static void testInfluenceSumExceeds100() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        Opportunity testOpp = [SELECT Id FROM Opportunity WHERE AccountId = :testContact.AccountId LIMIT 1];
-        
-        // Create existing CampaignInfluence with 80% influence
-        CampaignInfluence existingInfluence = new CampaignInfluence(
-            OpportunityId = testOpp.Id,
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Influence = 80
-        );
-        insert existingInfluence;
-        
-        Test.startTest();
-        
-        // Create another CampaignMember that would add 30% (total 110% - should not create)
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify only the original CampaignInfluence exists
-        List<CampaignInfluence> influences = [
-            SELECT Id, Influence FROM CampaignInfluence 
-            WHERE OpportunityId = :testOpp.Id
-            ORDER BY CreatedDate
-        ];
-        
-        System.assertEquals(1, influences.size(), 'Should not create additional CampaignInfluence if sum exceeds 100%');
-        System.assertEquals(80, influences[0].Influence, 'Original influence should remain unchanged');
-    }
-    
-    // Test case 7: Bulk CampaignMember processing
-    @isTest
-    static void testBulkCampaignMemberProcessing() {
-        List<Campaign> campaigns = [SELECT Id FROM Campaign];
-        List<Contact> contacts = [SELECT Id, AccountId FROM Contact WHERE AccountId != null];
-        
-        Test.startTest();
-        
-        // Create multiple CampaignMembers in bulk
-        List<CampaignMember> cmList = new List<CampaignMember>();
-        for (Integer i = 0; i < 50; i++) {
-            cmList.add(new CampaignMember(
-                CampaignId = campaigns[Math.mod(i, 2)].Id,
-                ContactId = contacts[Math.mod(i, contacts.size())].Id,
-                Status = 'Responded'
-            ));
-        }
-        insert cmList;
-        
-        Test.stopTest();
-        
-        // Verify CampaignInfluence records were created (number depends on conditions)
-        List<CampaignInfluence> influences = [SELECT Id FROM CampaignInfluence];
-        System.assert(influences.size() > 0, 'Should create some CampaignInfluence records in bulk');
-    }
-    
-    // Test case 8: Update CampaignMember to 'Responded' status
-    @isTest
-    static void testUpdateCampaignMemberToResponded() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        // Create CampaignMember with non-responded status first
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Sent'
-        );
-        insert cm;
-        
-        Test.startTest();
-        
-        // Update to 'Responded' status
-        cm.Status = 'Responded';
-        update cm;
-        
-        Test.stopTest();
-        
-        // Verify CampaignInfluence was created on update
-        List<CampaignInfluence> influences = [
-            SELECT Id FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
-        ];
-        
-        System.assertEquals(1, influences.size(), 'Should create CampaignInfluence when updated to Responded status');
-    }
-    
-    // Test case 9: Test with existing CampaignInfluence records for the same model
-    @isTest
-    static void testWithExistingCampaignInfluence() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        Opportunity testOpp = [SELECT Id FROM Opportunity WHERE AccountId = :testContact.AccountId LIMIT 1];
-        
-        // Create existing CampaignInfluence with 50% influence
-        CampaignInfluence existingInfluence = new CampaignInfluence(
-            OpportunityId = testOpp.Id,
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Influence = 50
-        );
-        insert existingInfluence;
-        
-        Test.startTest();
-        
-        // Create CampaignMember that would add 30% (total 80%)
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify both CampaignInfluence records exist
-        List<CampaignInfluence> influences = [
-            SELECT Id, Influence FROM CampaignInfluence 
-            WHERE OpportunityId = :testOpp.Id
-            ORDER BY CreatedDate
-        ];
-        
-        System.assertEquals(2, influences.size(), 'Should create both CampaignInfluence records');
-        
-        // Calculate total influence
-        Decimal totalInfluence = 0;
-        for (CampaignInfluence ci : influences) {
-            totalInfluence += ci.Influence;
-        }
-        
-        System.assertEquals(80, totalInfluence, 'Total influence should be 80');
-    }
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-Field does not exist: Name on CampaignInfluenceModel (line 12)
-Field does not exist: IsDefault on CampaignInfluenceModel (line 12)
-Field is not writeable: CampaignInfluenceModel.IsModelLocked  (line 12)
-DML operation Insert not allowed on CampaignInfluenceModel (line 17)
-Illegal assignment from Decimal to Integer (line 230)
-
-
-
-
-
-@isTest
-private class CampaignMemberTriggerTest {
-    
-    private static Id modelId;
-    
-    @testSetup
-    static void setupTestData() {
-        // First, check if we need to create a Campaign Influence Model
-        List<CampaignInfluenceModel> existingModels = [SELECT Id FROM CampaignInfluenceModel LIMIT 1];
-        if (existingModels.isEmpty()) {
-            // Create a test model if none exists
-            CampaignInfluenceModel testModel = new CampaignInfluenceModel(
-                Name = 'Test Model',
-                IsDefault = true,
-                IsModelLocked = true
+        if (existing.isEmpty()) {
+            EntitySubscription newSub = new EntitySubscription(
+                SubscriberId = UserInfo.getUserId(),
+                ParentId     = targetUserId
             );
-            insert testModel;
-            modelId = testModel.Id;
-        } else {
-            modelId = existingModels[0].Id;
-        }
-        
-        // Create test accounts
-        List<Account> testAccounts = new List<Account>();
-        for (Integer i = 0; i < 3; i++) {
-            testAccounts.add(new Account(Name = 'Test Account ' + i));
-        }
-        insert testAccounts;
-        
-        // Create test contacts
-        List<Contact> testContacts = new List<Contact>();
-        for (Integer i = 0; i < 6; i++) {
-            testContacts.add(new Contact(
-                FirstName = 'Test',
-                LastName = 'Contact ' + i,
-                AccountId = testAccounts[Math.mod(i, 3)].Id
-            ));
-        }
-        insert testContacts;
-        
-        // Create test campaigns
-        List<Campaign> testCampaigns = new List<Campaign>();
-        for (Integer i = 0; i < 2; i++) {
-            testCampaigns.add(new Campaign(
-                Name = 'Test Campaign ' + i,
-                IsActive = true
-            ));
-        }
-        insert testCampaigns;
-    }
-    
-    // Helper method to create opportunities with specific created dates
-    private static void createOpportunitiesWithDates(Date createdDate) {
-        List<Account> accounts = [SELECT Id FROM Account];
-        List<Opportunity> testOpportunities = new List<Opportunity>();
-        
-        for (Integer i = 0; i < accounts.size(); i++) {
-            testOpportunities.add(new Opportunity(
-                Name = 'Test Opp ' + i,
-                AccountId = accounts[i].Id,
-                StageName = 'Build Value',
-                CloseDate = Date.today().addDays(30),
-                Amount = 10000
-            ));
-        }
-        insert testOpportunities;
-        
-        // Set created dates for opportunities
-        List<Opportunity> oppsToUpdate = new List<Opportunity>();
-        for (Opportunity opp : testOpportunities) {
-            oppsToUpdate.add(new Opportunity(Id = opp.Id));
-        }
-        
-        // Use Test.setCreatedDate to set specific created dates
-        if (!oppsToUpdate.isEmpty()) {
-            Test.setCreatedDate(oppsToUpdate[0].Id, createdDate);
-            if (oppsToUpdate.size() > 1) {
-                Test.setCreatedDate(oppsToUpdate[1].Id, createdDate.addDays(-45));
+            
+            Id networkId = Network.getNetworkId();
+            if (networkId != null) {
+                newSub.NetworkId = networkId;
             }
-            if (oppsToUpdate.size() > 2) {
-                Test.setCreatedDate(oppsToUpdate[2].Id, createdDate.addDays(-100));
+            
+            insert newSub;
+        }
+    }
+
+    @AuraEnabled
+    public static void unfollowUser(Id targetUserId) {
+        if (targetUserId == null) return;
+        
+        List<EntitySubscription> subs = [
+            SELECT Id FROM EntitySubscription
+            WHERE SubscriberId = :UserInfo.getUserId()
+            AND ParentId = :targetUserId
+            LIMIT 1
+        ];
+        
+        if (!subs.isEmpty()) {
+            delete subs;
+        }
+    }
+
+    // ---------------------------
+    // PUBLIC: Get Hostels for dropdown
+    // ---------------------------
+    @AuraEnabled(cacheable=true)
+    public static List<HostelWrapper> getHostels() {
+        List<HostelWrapper> result = new List<HostelWrapper>();
+        if (!Schema.getGlobalDescribe().containsKey('Hostel_Detail__c')) return result;
+
+        for (Hostel_Detail__c h : [
+            SELECT Id, Name 
+            FROM Hostel_Detail__c 
+            ORDER BY Name ASC 
+            LIMIT 2000
+        ]) {
+            result.add(new HostelWrapper(h.Id, h.Name));
+        }
+        return result;
+    }
+
+    // ---------------------------
+    // PUBLIC: Get Chapters for dropdown
+    // ---------------------------
+    @AuraEnabled(cacheable=true)
+    public static List<ChapterWrapper> getChapters() {
+        List<ChapterWrapper> result = new List<ChapterWrapper>();
+        if (!Schema.getGlobalDescribe().containsKey('Chapter__c')) return result;
+
+        for (Chapter__c c : [
+            SELECT Id, Name 
+            FROM Chapter__c 
+            ORDER BY Name ASC 
+            LIMIT 2000
+        ]) {
+            result.add(new ChapterWrapper(c.Id, c.Name));
+        }
+        return result;
+    }
+
+    // ---------------------------
+    // PRIVATE HELPERS
+    // ---------------------------
+    private static List<PeopleWrapper> buildWrappersFromUsers(List<User> users) {
+        List<PeopleWrapper> result = new List<PeopleWrapper>();
+        if (users == null || users.isEmpty()) return result;
+
+        Set<Id> followedUserIds = new Set<Id>();
+        try {
+            for (EntitySubscription subscription : [
+                SELECT ParentId FROM EntitySubscription 
+                WHERE SubscriberId = :UserInfo.getUserId() 
+                LIMIT 1000
+            ]) {
+                followedUserIds.add(subscription.ParentId);
             }
+        } catch (Exception ex) {
+            System.debug('Error loading followed users: ' + ex.getMessage());
         }
-    }
-    
-    // Test case 1: CampaignMember with valid conditions should create CampaignInfluence
-    @isTest
-    static void testValidCampaignMemberCreatesInfluence() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        // Create opportunity with today's date
-        createOpportunitiesWithDates(Date.today());
-        Opportunity testOpp = [SELECT Id, CreatedDate FROM Opportunity WHERE AccountId = :testContact.AccountId LIMIT 1];
-        
-        Test.startTest();
-        
-        // Create CampaignMember with current date (within 90 days of opportunity)
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify CampaignInfluence was created
-        List<CampaignInfluence> influences = [
-            SELECT Id, OpportunityId, CampaignId, ContactId, Influence, ModelId
-            FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
-        ];
-        
-        System.assertEquals(1, influences.size(), 'Should create one CampaignInfluence record');
-        System.assertEquals(30, influences[0].Influence, 'Influence should be 30');
-        System.assertEquals(modelId, influences[0].ModelId, 'Should use correct model ID');
-    }
-    
-    // Test case 2: CampaignMember created outside 90-day window should not create influence
-    @isTest
-    static void testCampaignMemberOutside90DayWindow() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        // Create opportunity with date 100 days ago
-        Date oldDate = Date.today().addDays(-100);
-        createOpportunitiesWithDates(oldDate);
-        
-        Test.startTest();
-        
-        // Create CampaignMember with current date (outside 90-day window)
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify no CampaignInfluence was created
-        List<CampaignInfluence> influences = [
-            SELECT Id FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
-        ];
-        
-        System.assertEquals(0, influences.size(), 'Should not create CampaignInfluence outside 90-day window');
-    }
-    
-    // Test case 3: Test influence sum not exceeding 100%
-    @isTest
-    static void testInfluenceSumDoesNotExceed100() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        // Create opportunity
-        createOpportunitiesWithDates(Date.today());
-        Opportunity testOpp = [SELECT Id FROM Opportunity WHERE AccountId = :testContact.AccountId LIMIT 1];
-        
-        // Create existing CampaignInfluence with 80% influence
-        CampaignInfluence existingInfluence = new CampaignInfluence(
-            OpportunityId = testOpp.Id,
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Influence = 80,
-            ModelId = modelId
-        );
-        insert existingInfluence;
-        
-        Test.startTest();
-        
-        // Create another CampaignMember that would add 30% (total 110% - should not create)
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Verify only the original CampaignInfluence exists
-        List<CampaignInfluence> influences = [
-            SELECT Id, Influence FROM CampaignInfluence 
-            WHERE OpportunityId = :testOpp.Id
-            ORDER BY CreatedDate
-        ];
-        
-        System.assertEquals(1, influences.size(), 'Should not create additional CampaignInfluence if sum exceeds 100%');
-        System.assertEquals(80, influences[0].Influence, 'Original influence should remain unchanged');
-    }
-    
-    // Test case 4: Test multiple CampaignMembers for same opportunity
-    @isTest
-    static void testMultipleCampaignMembersSameOpportunity() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        // Create opportunity
-        createOpportunitiesWithDates(Date.today());
-        Opportunity testOpp = [SELECT Id FROM Opportunity WHERE AccountId = :testContact.AccountId LIMIT 1];
-        
-        Test.startTest();
-        
-        // Create multiple CampaignMembers that should all create influences
-        List<CampaignMember> cmList = new List<CampaignMember>();
-        for (Integer i = 0; i < 3; i++) {
-            cmList.add(new CampaignMember(
-                CampaignId = testCampaign.Id,
-                ContactId = testContact.Id,
-                Status = 'Responded'
+
+        for (User user : users) {
+            String contactName = user.Contact != null ? user.Contact.Name : user.Name;
+            String chapterName = (user.Contact != null && user.Contact.Chapter__r != null) 
+                                 ? user.Contact.Chapter__r.Name : null;
+            List<String> hostelNames = new List<String>();
+            if (user.Contact != null && user.Contact.Hostel__r != null) {
+                hostelNames.add(user.Contact.Hostel__r.Name);
+            }
+
+            result.add(new PeopleWrapper(
+                user.Id,
+                user.Name,
+                contactName,
+                user.SmallPhotoUrl,
+                chapterName,
+                hostelNames,
+                followedUserIds.contains(user.Id)
             ));
         }
-        insert cmList;
-        
-        Test.stopTest();
-        
-        // Verify multiple CampaignInfluence records were created (up to 100% limit)
-        List<CampaignInfluence> influences = [
-            SELECT Id, Influence FROM CampaignInfluence 
-            WHERE OpportunityId = :testOpp.Id
-            ORDER BY CreatedDate
-        ];
-        
-        // Should create 3 influences: 30 + 30 + 30 = 90 (doesn't exceed 100)
-        System.assertEquals(3, influences.size(), 'Should create multiple CampaignInfluence records');
-        Integer totalInfluence = 0;
-        for (CampaignInfluence ci : influences) {
-            totalInfluence += ci.Influence;
-        }
-        System.assertEquals(90, totalInfluence, 'Total influence should be 90');
-    }
-    
-    // Test case 5: Test bulk processing with mixed scenarios
-    @isTest
-    static void testBulkProcessing() {
-        List<Campaign> campaigns = [SELECT Id FROM Campaign];
-        List<Contact> contacts = [SELECT Id, AccountId FROM Contact WHERE AccountId != null];
-        
-        // Create opportunities for all accounts
-        createOpportunitiesWithDates(Date.today());
-        
-        Test.startTest();
-        
-        // Create bulk CampaignMembers
-        List<CampaignMember> cmList = new List<CampaignMember>();
-        for (Integer i = 0; i < 20; i++) {
-            cmList.add(new CampaignMember(
-                CampaignId = campaigns[Math.mod(i, campaigns.size())].Id,
-                ContactId = contacts[Math.mod(i, contacts.size())].Id,
-                Status = 'Responded'
-            ));
-        }
-        insert cmList;
-        
-        Test.stopTest();
-        
-        // Verify CampaignInfluence records were created
-        List<CampaignInfluence> influences = [SELECT Id FROM CampaignInfluence];
-        System.assert(influences.size() > 0, 'Should create CampaignInfluence records in bulk');
-        System.assert(influences.size() <= 20, 'Should not exceed number of valid CampaignMembers');
-    }
-    
-    // Test case 6: Test update from non-responded to responded
-    @isTest
-    static void testUpdateToResponded() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        // Create opportunity
-        createOpportunitiesWithDates(Date.today());
-        
-        // Create CampaignMember with non-responded status
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Sent'
-        );
-        insert cm;
-        
-        Test.startTest();
-        
-        // Update to responded status
-        cm.Status = 'Responded';
-        update cm;
-        
-        Test.stopTest();
-        
-        // Verify CampaignInfluence was created on update
-        List<CampaignInfluence> influences = [
-            SELECT Id FROM CampaignInfluence 
-            WHERE ContactId = :testContact.Id
-        ];
-        
-        System.assertEquals(1, influences.size(), 'Should create CampaignInfluence when updated to Responded status');
-    }
-    
-    // Test case 7: Test with different model ID scenario
-    @isTest
-    static void testWithDifferentModel() {
-        Campaign testCampaign = [SELECT Id FROM Campaign WHERE Name = 'Test Campaign 0' LIMIT 1];
-        Contact testContact = [SELECT Id, AccountId FROM Contact WHERE LastName = 'Contact 0' LIMIT 1];
-        
-        // Create opportunity
-        createOpportunitiesWithDates(Date.today());
-        Opportunity testOpp = [SELECT Id FROM Opportunity WHERE AccountId = :testContact.AccountId LIMIT 1];
-        
-        // Create CampaignInfluence with different model ID first
-        CampaignInfluence existingInfluence = new CampaignInfluence(
-            OpportunityId = testOpp.Id,
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Influence = 50,
-            ModelId = (modelId == '03VBh000000AkKvMAK') ? 'differentModelId' : '03VBh000000AkKvMAK'
-        );
-        insert existingInfluence;
-        
-        Test.startTest();
-        
-        // Create CampaignMember
-        CampaignMember cm = new CampaignMember(
-            CampaignId = testCampaign.Id,
-            ContactId = testContact.Id,
-            Status = 'Responded'
-        );
-        insert cm;
-        
-        Test.stopTest();
-        
-        // Should still create new influence because different model ID
-        List<CampaignInfluence> influences = [
-            SELECT Id, Influence, ModelId FROM CampaignInfluence 
-            WHERE OpportunityId = :testOpp.Id
-        ];
-        
-        System.assertEquals(2, influences.size(), 'Should create new CampaignInfluence with different model ID');
+
+        return result;
     }
 }
-
-
-
-
-
-
-
-
-
-Id IN :accountIds AND StageName = 'Build Value'  ]) {
-        if (!accountToOppsMap.containsKey(opp.AccountId)) {  accountToOppsMap.put(opp.AccountId, new List<Opportunity>());
-        }
-        accountToOppsMap.get(opp.AccountId).add(opp);
-    }
-    if(accountToOppsMap.isEmpty()) return;
-
-    // Step 4: Gather all Opportunity Ids to check existing Influence sum
-    Set<Id> oppIds = new Set<Id>();
-    for(List<Opportunity> oppList : accountToOppsMap.values()) {
-        for(Opportunity opp : oppList) {
-            oppIds.add(opp.Id);
-        }
-    }
-    if(oppIds.isEmpty()) return;
-
-    // Step 5: Fetch existing CampaignInfluence sums per Opportunity for the Model
-    Map<Id, Decimal> oppToInfluenceSumMap = new Map<Id, Decimal>();
-    for (AggregateResult ar : [
-        SELECT OpportunityId, SUM(Influence) totalInfluence
-        FROM CampaignInfluence WHERE OpportunityId IN :oppIds AND ModelId = '03VBh000000AkKvMAK'
-        GROUP BY OpportunityId
-    ]) { oppToInfluenceSumMap.put((Id)ar.get('OpportunityId'), (Decimal)ar.get('totalInfluence'));
-    }
-
-    // Step 6: Prepare list to insert
-    List<CampaignInfluence> toInsert = new List<CampaignInfluence>();
-
-    for (CampaignMember cm : cmList) {
-       Contact c = contactMap.get(cm.ContactId);
-        if (c == null || c.AccountId == null || !accountToOppsMap.containsKey(c.AccountId)) continue;
-        List<Opportunity> opps = accountToOppsMap.get(c.AccountId);
-        for (Opportunity opp : opps) {
-            Integer daysDiff = cm.CreatedDate.date().daysBetween(opp.CreatedDate.date());
-            if (daysDiff >= 0 && daysDiff <= 90) {
-                Decimal currentInfluenceSum = oppToInfluenceSumMap.containsKey(opp.Id) ? oppToInfluenceSumMap.get(opp.Id) : 0;
-                // Check if adding 30 exceeds 100
-                if (currentInfluenceSum + 30 <= 100) {
-                    CampaignInfluence ci = new CampaignInfluence();  ci.OpportunityId = opp.Id; 
-                    ci.CampaignId = cm.CampaignId;
-                    ci.ContactId = cm.ContactId;
-                    ci.Influence = 30;
-                    ci.ModelId = '03VBh000000AkKvMAK';
-                    toInsert.add(ci);
-
-                    // Update the sum map to reflect this addition for subsequent iterations
-                    oppToInfluenceSumMap.put(opp.Id, currentInfluenceSum + 30);
-                } else {
-                    // Skip inserting as influence would exceed 100%
-                    System.debug('Skipping insert for Opportunity ' + opp.Id + ' as influence sum would exceed 100%. Current sum: ' + currentInfluenceSum);
-                }
-            }
-        }
-    }
-
-    if (!toInsert.isEmpty()) {  try { insert toInsert;
-        } catch (Exception e) { System.debug('Error inserting CampaignInfluence: ' + e.getMessage());
-
-this part of code is not running, see you have to somehow make it test it because currently i am only getting 33% which is very less.
-all your test cases are failing, maybe change your approach but think deep and cover it somehow we gotta get more than 75 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-trigger CampaignMemberTrigger on CampaignMember (after insert, after update) {
-    List<CampaignMember> cmList = new List<CampaignMember>();
-    Set<Id> contactIds = new Set<Id>();
-    
-    // Step 1: Filter only responded CampaignMembers with ContactId
-    for (CampaignMember cm : Trigger.new) {
-        if (cm.Status == 'Responded' && cm.ContactId != null) {
-            cmList.add(cm);
-            contactIds.add(cm.ContactId);
-        }
-    }
-    if (cmList.isEmpty()) return;
-    // Step 2: Get Contact → AccountId
-    Map<Id, Contact> contactMap = new Map<Id, Contact>(
-        [SELECT Id, AccountId FROM Contact WHERE Id IN :contactIds]
-    );
-    Set<Id> accountIds = new Set<Id>();
-    for (Contact c : contactMap.values()) {
-        if (c.AccountId != null) {
-            accountIds.add(c.AccountId);
-        }
-    }
-    if (accountIds.isEmpty()) return;
-    // Step 3: Get Opportunities from Accounts (with Stage = 'Build Value')
-    Map<Id, List<Opportunity>> accountToOppsMap = new Map<Id, List<Opportunity>>();
-    for (Opportunity opp : [
-        SELECT Id, AccountId, StageName, CreatedDate
-        FROM Opportunity
-        WHERE AccountId IN :accountIds AND StageName = 'Build Value'  ]) {
-        if (!accountToOppsMap.containsKey(opp.AccountId)) {  accountToOppsMap.put(opp.AccountId, new List<Opportunity>());
-        }
-        accountToOppsMap.get(opp.AccountId).add(opp);
-    }
-    if(accountToOppsMap.isEmpty()) return;
-
-    // Step 4: Gather all Opportunity Ids to check existing Influence sum
-    Set<Id> oppIds = new Set<Id>();
-    for(List<Opportunity> oppList : accountToOppsMap.values()) {
-        for(Opportunity opp : oppList) {
-            oppIds.add(opp.Id);
-        }
-    }
-    if(oppIds.isEmpty()) return;
-
-    // Step 5: Fetch existing CampaignInfluence sums per Opportunity for the Model
-    Map<Id, Decimal> oppToInfluenceSumMap = new Map<Id, Decimal>();
-    for (AggregateResult ar : [
-        SELECT OpportunityId, SUM(Influence) totalInfluence
-        FROM CampaignInfluence WHERE OpportunityId IN :oppIds AND ModelId = '03VBh000000AkKvMAK'
-        GROUP BY OpportunityId
-    ]) { oppToInfluenceSumMap.put((Id)ar.get('OpportunityId'), (Decimal)ar.get('totalInfluence'));
-    }
-
-    // Step 6: Prepare list to insert
-    List<CampaignInfluence> toInsert = new List<CampaignInfluence>();
-
-    for (CampaignMember cm : cmList) {
-       Contact c = contactMap.get(cm.ContactId);
-        if (c == null || c.AccountId == null || !accountToOppsMap.containsKey(c.AccountId)) continue;
-        List<Opportunity> opps = accountToOppsMap.get(c.AccountId);
-        for (Opportunity opp : opps) {
-            Integer daysDiff = cm.CreatedDate.date().daysBetween(opp.CreatedDate.date());
-            if (daysDiff >= 0 && daysDiff <= 90) {
-                Decimal currentInfluenceSum = oppToInfluenceSumMap.containsKey(opp.Id) ? oppToInfluenceSumMap.get(opp.Id) : 0;
-                // Check if adding 30 exceeds 100
-                if (currentInfluenceSum + 30 <= 100) {
-                    CampaignInfluence ci = new CampaignInfluence();  ci.OpportunityId = opp.Id; 
-                    ci.CampaignId = cm.CampaignId;
-                    ci.ContactId = cm.ContactId;
-                    ci.Influence = 30;
-                    ci.ModelId = '03VBh000000AkKvMAK';
-                    toInsert.add(ci);
-
-                    // Update the sum map to reflect this addition for subsequent iterations
-                    oppToInfluenceSumMap.put(opp.Id, currentInfluenceSum + 30);
-                } else {
-                    // Skip inserting as influence would exceed 100%
-                    System.debug('Skipping insert for Opportunity ' + opp.Id + ' as influence sum would exceed 100%. Current sum: ' + currentInfluenceSum);
-                }
-            }
-        }
-    }
-
-    if (!toInsert.isEmpty()) {  try { insert toInsert;
-        } catch (Exception e) { System.debug('Error inserting CampaignInfluence: ' + e.getMessage());
-        }
-    }
-}
-
-
-Write a test class for this in sfdc make sure you cover all cases, get more than 75 percent coverage
